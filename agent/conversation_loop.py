@@ -1184,6 +1184,17 @@ def run_conversation(
     _plugin_user_context = _ctx.plugin_user_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
 
+    # Bind the per-session Docker container key so each session gets its own
+    # sandbox while subagents share the root parent's (via _root_session_id
+    # propagation in delegate_tool._build_child_agent).
+    try:
+        from tools.terminal_tool import set_terminal_container_key
+        set_terminal_container_key(
+            getattr(agent, "_root_session_id", None) or agent.session_id or "default"
+        )
+    except Exception:
+        pass
+
     # Commentary deduplication spans all provider continuations and tool calls
     # within one user turn, but must not suppress the same phrase next turn.
     agent._delivered_interim_texts = set()

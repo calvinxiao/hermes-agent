@@ -44,6 +44,7 @@ import threading
 import atexit
 import shutil
 import subprocess
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -1053,6 +1054,24 @@ _creation_locks_lock = threading.Lock()  # Protects _creation_locks dict itself
 _cleanup_thread = None
 _cleanup_running = False
 
+# Per-context container key: set by the conversation loop to the root session id
+# so each session gets its own Docker sandbox while subagents share the parent's.
+# Defaults to "default" for paths that bypass the conversation loop.
+_terminal_container_key: ContextVar[str] = ContextVar(
+    "terminal_container_key", default="default"
+)
+
+
+def set_terminal_container_key(key: str) -> None:
+    """Set the per-session container key used by ``_resolve_container_task_id``.
+
+    Called from the conversation loop with ``agent._root_session_id`` so that
+    every tool call within a turn resolves to the same session-scoped sandbox.
+    Subagents inherit the root parent's key via ``_root_session_id`` propagation
+    in ``delegate_tool._build_child_agent``.
+    """
+    _terminal_container_key.set(key or "default")
+
 # Once-per-process guard for the docker orphan reaper (issue #20561).
 # Set when _maybe_reap_docker_orphans first runs; concurrent _create_environment
 # calls for parallel subagents won't re-trigger the sweep.
@@ -1243,12 +1262,12 @@ def _resolve_container_task_id(task_id: Optional[str]) -> str:
     Map a tool-call ``task_id`` to the container/sandbox key used by
     ``_active_environments``.
 
-    The top-level agent passes ``task_id=None`` and lands on ``"default"``.
-    ``delegate_task`` children pass their own subagent ID so that
-    file-state tracking, the active-subagents registry, and TUI events stay
-    distinct per child -- but we deliberately collapse that ID back to
-    ``"default"`` here so subagents share the parent's long-lived container
-    (one bash, one /workspace, one set of installed packages).
+    The conversation loop sets a per-session ContextVar
+    (``_terminal_container_key``) to the root session id before tool calls,
+    so each top-level session gets its own sandbox while subagents share
+    the root parent's container (one bash, one /workspace, one set of
+    installed packages).  Paths that bypass the conversation loop fall back
+    to ``"default"``.
 
     Exception: RL / benchmark environments (TerminalBench2, HermesSweEnv, ...)
     call ``register_task_env_overrides(task_id, {...})`` to request a
@@ -1270,7 +1289,7 @@ def _resolve_container_task_id(task_id: Optional[str]) -> str:
         overrides = _task_env_overrides[task_id]
         if set(overrides.keys()) & _ISOLATION_KEYS:
             return task_id
-    return "default"
+    return _terminal_container_key.get()
 
 
 def resolve_task_overrides(task_id: Optional[str]) -> Dict[str, Any]:
